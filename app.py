@@ -359,8 +359,11 @@ def score_application(student: dict) -> float:
         if col in df_row: df_row[col] = df_row[col].fillna(modes.get(col,"Unknown")).astype(str)
     try:
         X = lasso_pre.transform(df_row[feature_cols])
-        return round(lasso_model.predict_proba(X)[0][1]*100,1)
-    except: return 0.0
+        prob = lasso_model.predict_proba(X)[0][1]
+        return round(prob*100,1)
+    except Exception as e:
+        st.error(f"Scoring error: {e} | Features sent: {row}")
+        return 0.0
 
 FORTUNE_500 = {
     "Amazon","Target","Google","Visa Inc.","Dell Technologies Inc.",
