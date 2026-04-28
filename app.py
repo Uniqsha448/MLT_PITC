@@ -359,71 +359,126 @@ def score_application(student: dict) -> float:
         if col in df_row: df_row[col] = df_row[col].fillna(modes.get(col,"Unknown")).astype(str)
     try:
         X = lasso_pre.transform(df_row[feature_cols])
-        prob = lasso_model.predict_proba(X)[0][1]
-        return round(prob*100,1)
+        return round(lasso_model.predict_proba(X)[0][1]*100,1)
+    except: return 0.0
+
+# ══════════════════════════════════════════════════════════════════════
+# LOOKUP TABLES — loaded once at startup
+# The model was trained by merging title_features.csv and
+# company_attributes_combined.csv. We must replicate that lookup exactly.
+# ══════════════════════════════════════════════════════════════════════
+
+@st.cache_data
+def load_lookup_tables():
+    """Load title and company lookup tables from the app folder."""
+    title_df   = None
+    company_df = None
+    try:
+        title_path = os.path.join(BASE, "title_features.csv")
+        if os.path.exists(title_path):
+            title_df = pd.read_csv(title_path, encoding="latin-1")
+            title_df.columns = [c.strip() for c in title_df.columns]
     except Exception as e:
-        st.error(f"Scoring error: {e} | Features sent: {row}")
-        return 0.0
+        st.warning(f"Could not load title_features.csv: {e}")
+    try:
+        company_path = os.path.join(BASE, "company_attributes_combined.csv")
+        if os.path.exists(company_path):
+            company_df = pd.read_csv(company_path, encoding="latin-1")
+            company_df.columns = [c.strip() for c in company_df.columns]
+            # Rename Company → Related Organization to match training script
+            if "Company" in company_df.columns:
+                company_df = company_df.rename(columns={"Company": "Related Organization"})
+            # Drop Sector if present (training script does this)
+            company_df = company_df.drop(columns=["Sector"], errors="ignore")
+    except Exception as e:
+        st.warning(f"Could not load company_attributes_combined.csv: {e}")
+    return title_df, company_df
 
-FORTUNE_500 = {
-    "Amazon","Target","Google","Visa Inc.","Dell Technologies Inc.",
-    "Citi","AT&T","Morgan Stanley","JPMorgan Chase","Goldman Sachs",
-    "Bank of America","Wells Fargo","Microsoft","Apple","Meta","Meta Platforms",
-    "IBM","Intel","Oracle","Cisco","Johnson & Johnson","Procter & Gamble",
-    "PepsiCo","Coca-Cola","Nike","Walt Disney","Netflix","Salesforce","Adobe",
-    "PayPal","American Express","Capital One","T-Mobile","Verizon","Home Depot",
-    "Walmart","Costco","General Electric","Honeywell","Lockheed Martin","Boeing",
-    "General Motors","Ford","ExxonMobil","Chevron","Pfizer","Merck","Eli Lilly",
-    "Accenture","Uber","Mastercard","Starbucks Coffee Company","LinkedIn",
-    "Deloitte","BlackRock","Charles Schwab","Kearney","Boston Consulting",
-    "McKinsey","Bain","FICO","Chick-Fil-A","Facebook",
-}
+title_lookup_df, company_lookup_df = load_lookup_tables()
 
-def infer_seniority(title):
-    t = title.lower()
-    if any(x in t for x in ['mba','graduate','grad']): return 'MBA / Graduate'
-    if any(x in t for x in ['senior','sr.','lead','principal']): return 'Senior'
-    if any(x in t for x in ['manager','director','vp','vice president']): return 'Manager/Director'
-    if any(x in t for x in ['intern','internship','summer']): return 'Undergraduate'
-    return 'Unspecified'
-
-def infer_position_type(title):
-    t = title.lower()
-    if any(x in t for x in ['analyst','analysis']): return 'Analyst'
-    if any(x in t for x in ['engineer','developer','software','swe']): return 'Engineer'
-    if any(x in t for x in ['manager','management']): return 'Manager'
-    if any(x in t for x in ['consult']): return 'Consultant'
-    if any(x in t for x in ['associate']): return 'Associate'
-    return 'Intern'
-
-def app_to_features(app):
-    title    = str(app.get('job_title',''))
-    company  = str(app.get('company',''))
-    industry = str(app.get('industry',''))
-    t_lower  = title.lower()
-    is_summer   = 1 if any(x in t_lower for x in ['summer','intern']) else 0
-    is_fortune  = 'Yes' if company.strip() in FORTUNE_500 else 'No'
-    title_words = len(title.split()) if title.strip() else 1
-    seniority   = infer_seniority(title)
-    position    = infer_position_type(title)
-    company_size = app.get('company_size','')
-    if not company_size or company_size in ['','nan','None','Mid (1K-10K)']:
-        company_size = 'Enterprise (50K+)'
-    ind_subsector = industry if industry and industry not in ['','nan','None'] else 'Food & Beverage'
+def get_title_features(job_title: str) -> dict:
+    """
+    Look up title features from title_features.csv — exactly as training script did.
+    Falls back to mode values if title not found.
+    """
+    defaults = {
+        "Title_Word_Count": 1,
+        "Position_Type":    modes.get("Position_Type", "Intern"),
+        "Seniority_Level":  modes.get("Seniority_Level", "Unspecified"),
+        "Summer_Internship": 0,
+    }
+    if title_lookup_df is None or not job_title or str(job_title).strip() == "":
+        return defaults
+    match = title_lookup_df[title_lookup_df["Title"].str.strip() == str(job_title).strip()]
+    if len(match) == 0:
+        # Try case-insensitive
+        match = title_lookup_df[
+            title_lookup_df["Title"].str.strip().str.lower() == str(job_title).strip().lower()
+        ]
+    if len(match) == 0:
+        return defaults
+    row = match.iloc[0]
     return {
-        'Primary Functional Interest': app.get('func_interest','') or modes.get('Primary Functional Interest','Consulting (Management Consulting / Strategy)'),
-        'Designated Low Income':       int(bool(app.get('low_income',False))),
-        'First Generation College':    'Yes' if app.get('first_gen') else 'No',
-        'Undergrad GPA':               float(app.get('gpa') or medians.get('Undergrad GPA',3.5)),
-        'Pell Grant Count':            int(app.get('pell',0) or 0),
-        'SAT Score':                   int(app.get('sat',0) or 0),
-        'Summer_Internship':           is_summer,
-        'Position_Type':               position,
-        'Seniority_Level':             seniority,
-        'Title_Word_Count':            title_words,
-        'Industry_Subsector':          ind_subsector,
-        'Company_Size_Bucket':         company_size,
-        'Is_Fortune500':               is_fortune,
+        "Title_Word_Count": int(row.get("Title_Word_Count", defaults["Title_Word_Count"])),
+        "Position_Type":    str(row.get("Position_Type",    defaults["Position_Type"])),
+        "Seniority_Level":  str(row.get("Seniority_Level",  defaults["Seniority_Level"])),
+        "Summer_Internship": int(row.get("Summer_Internship", defaults["Summer_Internship"])),
+    }
+
+def get_company_features(company: str) -> dict:
+    """
+    Look up company features from company_attributes_combined.csv.
+    Falls back to mode values if company not found.
+    """
+    defaults = {
+        "Industry_Subsector":  modes.get("Industry_Subsector",  "Other"),
+        "Company_Size_Bucket": modes.get("Company_Size_Bucket", "Enterprise (50K+)"),
+        "Is_Fortune500":       modes.get("Is_Fortune500",       "No"),
+    }
+    if company_lookup_df is None or not company or str(company).strip() == "":
+        return defaults
+    match = company_lookup_df[
+        company_lookup_df["Related Organization"].str.strip() == str(company).strip()
+    ]
+    if len(match) == 0:
+        match = company_lookup_df[
+            company_lookup_df["Related Organization"].str.strip().str.lower() == str(company).strip().lower()
+        ]
+    if len(match) == 0:
+        return defaults
+    row = match.iloc[0]
+    return {
+        "Industry_Subsector":  str(row.get("Industry_Subsector",  defaults["Industry_Subsector"])),
+        "Company_Size_Bucket": str(row.get("Company_Size_Bucket", defaults["Company_Size_Bucket"])),
+        "Is_Fortune500":       str(row.get("Is_Fortune500",       defaults["Is_Fortune500"])),
+    }
+
+def app_to_features(app: dict) -> dict:
+    """
+    Converts stored applicant dict → exact 13 features the LASSO model expects.
+    Uses lookup tables (title_features.csv, company_attributes_combined.csv)
+    exactly as the training script did — no guessing from strings.
+    """
+    title_feats   = get_title_features(app.get("job_title", ""))
+    company_feats = get_company_features(app.get("company", ""))
+
+    return {
+        # Applicant features
+        "Primary Functional Interest": app.get("func_interest", "") or modes.get("Primary Functional Interest", ""),
+        "Designated Low Income":       int(bool(app.get("low_income", False))),
+        "First Generation College":    "Yes" if app.get("first_gen") else "No",
+        "Undergrad GPA":               float(app.get("gpa") or medians.get("Undergrad GPA", 3.5)),
+        "Pell Grant Count":            int(app.get("pell", 0) or 0),
+        "SAT Score":                   int(app.get("sat", 0) or 0),
+        # Title features — from lookup table
+        "Summer_Internship":           title_feats["Summer_Internship"],
+        "Title_Word_Count":            title_feats["Title_Word_Count"],
+        "Position_Type":               title_feats["Position_Type"],
+        "Seniority_Level":             title_feats["Seniority_Level"],
+        # Company features — from lookup table
+        "Industry_Subsector":          company_feats["Industry_Subsector"],
+        "Company_Size_Bucket":         company_feats["Company_Size_Bucket"],
+        "Is_Fortune500":               company_feats["Is_Fortune500"],
     }
 
 def excel_row_to_applicant(row, coach_name):
