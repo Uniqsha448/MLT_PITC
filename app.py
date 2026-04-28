@@ -385,9 +385,7 @@ def load_lookup_tables():
         if os.path.exists(company_path):
             company_df = pd.read_csv(company_path, encoding="latin-1")
             company_df.columns = [c.strip() for c in company_df.columns]
-            # Rename Company → Related Organization to match training script
-            if "Company" in company_df.columns:
-                company_df = company_df.rename(columns={"Company": "Related Organization"})
+            # Keep Company column as-is — lookup uses "Company" column name
             # Drop Sector if present (training script does this)
             company_df = company_df.drop(columns=["Sector"], errors="ignore")
     except Exception as e:
@@ -398,52 +396,72 @@ title_lookup_df, company_lookup_df = load_lookup_tables()
 
 def get_title_features(job_title: str) -> dict:
     """
-    Look up title features from title_features.csv — exactly as training script did.
+    Look up title features from title_features.csv.
+    Tries exact match first, then case-insensitive, then partial contains.
     Falls back to mode values if title not found.
     """
     defaults = {
-        "Title_Word_Count": 1,
-        "Position_Type":    modes.get("Position_Type", "Intern"),
-        "Seniority_Level":  modes.get("Seniority_Level", "Unspecified"),
+        "Title_Word_Count":  len(str(job_title).split()) if job_title else 1,
+        "Position_Type":     modes.get("Position_Type",    "Intern"),
+        "Seniority_Level":   modes.get("Seniority_Level",  "Unspecified"),
         "Summer_Internship": 0,
     }
     if title_lookup_df is None or not job_title or str(job_title).strip() == "":
         return defaults
-    match = title_lookup_df[title_lookup_df["Title"].str.strip() == str(job_title).strip()]
+    t = str(job_title).strip()
+    tl = t.lower()
+    # 1. Exact match
+    match = title_lookup_df[title_lookup_df["Title"].str.strip() == t]
+    # 2. Case-insensitive exact
     if len(match) == 0:
-        # Try case-insensitive
-        match = title_lookup_df[
-            title_lookup_df["Title"].str.strip().str.lower() == str(job_title).strip().lower()
-        ]
+        match = title_lookup_df[title_lookup_df["Title"].str.strip().str.lower() == tl]
+    # 3. Contains match (title_df title contains the input)
+    if len(match) == 0:
+        match = title_lookup_df[title_lookup_df["Title"].str.lower().str.contains(tl, regex=False, na=False)]
+    # 4. Input contains a title from the lookup
+    if len(match) == 0:
+        match = title_lookup_df[title_lookup_df["Title"].apply(
+            lambda x: str(x).lower() in tl if pd.notna(x) else False)]
     if len(match) == 0:
         return defaults
     row = match.iloc[0]
     return {
-        "Title_Word_Count": int(row.get("Title_Word_Count", defaults["Title_Word_Count"])),
-        "Position_Type":    str(row.get("Position_Type",    defaults["Position_Type"])),
-        "Seniority_Level":  str(row.get("Seniority_Level",  defaults["Seniority_Level"])),
+        "Title_Word_Count":  int(row.get("Title_Word_Count",  defaults["Title_Word_Count"])),
+        "Position_Type":     str(row.get("Position_Type",     defaults["Position_Type"])),
+        "Seniority_Level":   str(row.get("Seniority_Level",   defaults["Seniority_Level"])),
         "Summer_Internship": int(row.get("Summer_Internship", defaults["Summer_Internship"])),
     }
 
 def get_company_features(company: str) -> dict:
     """
     Look up company features from company_attributes_combined.csv.
-    Falls back to mode values if company not found.
+    Tries exact match, then case-insensitive, then partial contains.
+    Company column in CSV is named 'Company'.
     """
     defaults = {
-        "Industry_Subsector":  modes.get("Industry_Subsector",  "Other"),
+        "Industry_Subsector":  modes.get("Industry_Subsector",  "Food & Beverage"),
         "Company_Size_Bucket": modes.get("Company_Size_Bucket", "Enterprise (50K+)"),
         "Is_Fortune500":       modes.get("Is_Fortune500",       "No"),
     }
     if company_lookup_df is None or not company or str(company).strip() == "":
         return defaults
-    match = company_lookup_df[
-        company_lookup_df["Related Organization"].str.strip() == str(company).strip()
-    ]
+    c  = str(company).strip()
+    cl = c.lower()
+    col = "Company"  # actual column name in CSV
+    if col not in company_lookup_df.columns:
+        return defaults
+    # 1. Exact match
+    match = company_lookup_df[company_lookup_df[col].str.strip() == c]
+    # 2. Case-insensitive exact
     if len(match) == 0:
-        match = company_lookup_df[
-            company_lookup_df["Related Organization"].str.strip().str.lower() == str(company).strip().lower()
-        ]
+        match = company_lookup_df[company_lookup_df[col].str.strip().str.lower() == cl]
+    # 3. CSV entry contains input (e.g. "Goldman Sachs & Co." contains "Goldman Sachs")
+    if len(match) == 0:
+        match = company_lookup_df[company_lookup_df[col].str.lower().str.contains(cl, regex=False, na=False)]
+    # 4. Input contains CSV entry
+    if len(match) == 0:
+        match = company_lookup_df[company_lookup_df[col].apply(
+            lambda x: str(x).lower() in cl if pd.notna(x) else False)]
     if len(match) == 0:
         return defaults
     row = match.iloc[0]
